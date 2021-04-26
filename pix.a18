@@ -1,0 +1,237 @@
+; -------------------------------------------------------------------
+; *** pix: a simple image displayer for the 1861 Pixie chip
+; ***
+; *** Build #
+; ***  1: Initial version
+; *******************************************************************
+; *** This software is copyleft 2021 by Wayne Hortensius          ***
+; *** All wrongs reserved.                                        ***
+; *******************************************************************
+; *** Assembled with my modified version of the A18 assembler     ***
+; *** originally from https://github.com/carangil/A18:            ***
+; *** New & alternately named pseudo-ops: #else, #endif, #if,     ***
+; ***   .echo, .error, .eject, .page, .title, call, dc, eject,    ***
+; ***   endif, include, mov, pop, popd, push, pushd, retn, title  ***
+; *** Geany compatible error messages                             ***
+; *******************************************************************
+;
+	incl	"bios.inc"
+	incl	"kernel.inc"
+;
+OrgAddr	equ	2000h
+;
+	org	OrgAddr-6
+	dw	OrgAddr
+	dw	endrom-OrgAddr
+	dw	OrgAddr
+
+	org	OrgAddr
+Start:	br	Main
+;
+Date:	db	80h+3		; Month: April
+	db	25		; Day 25
+	dw	2021		; year = 2021
+;
+Build:	dw	1		; build number
+	db	'@Copyleft 2021 Wayne Hortensius',0
+;
+cr	equ	13
+lf	equ	10
+tab	equ	9
+;
+; Register usage
+; R0: DMA address
+; R!: interrupt address
+; R2-R6: Elf/OS
+; R7:    
+; R8:    
+; R9:    
+; RA:    
+; RB:    
+; RC:    
+; RD:    
+; RE:    Elf/OS
+; RF:    
+;
+Main:	lda	ra		; ra -> command tail
+	smi	' '		; skip over spaces to find
+	lbz	Main		; filename argument
+	dec	ra
+	ghi	ra		; temp copy of argument address in rf
+	phi	rf
+	glo	ra
+	plo	rf
+FindTerminator:
+	lda	rf		; look for first non printable char
+	smi	' '+1		; (i.e. end of command tail)
+	lbdf	FindTerminator
+	dec	rf
+	ldi	0		; terminate command tail with NUL
+	str	rf
+	ghi	ra		; ra -> start of filename argument
+	phi	rf		; copy ra to rf
+	glo	ra
+	plo	rf
+	ldn	rf		; any argument?
+	lbnz	OpenImg		; yep, try opening it as a file
+	call	f_inmsg		; otherwise display usage message
+	db	'Usage: pix imagefile',cr,lf,0
+	retn			; return to Elf/OS
+;
+OpenImg:
+	load	rd,ImgFildes	; image file descriptor
+	ldi	0		; (no create, no truncate, no append) flags
+	plo	r7
+	call	O_OPEN		; attempt to open file
+	lbnf	ImgOpened	; DF=0, file was opened
+	call	f_inmsg
+	db	'File not found',cr,lf,0
+	lbr	O_WRMBOOT	; return to Elf/OS
+;
+ImgOpened:
+	load	rc,512
+	load	rf,ImgBuff
+	load	rd,ImgFildes
+	call	O_READ		; read the image file
+	lbdf	ReadError	; DF=1, read error
+	glo	rc		; check file size read
+	lbnz	SizeError
+	ghi	rc
+	smi	1
+	lbz	Display32
+	smi	1
+	lbz	Display64
+SizeError:
+	call	f_inmsg
+	db	'Unknown image resolution',cr,lf,0
+	lbr	CloseFileAndExit
+;
+ReadError:
+	call	f_inmsg
+	db	'Error reading image file',cr,lf,0
+	lbr	CloseFileAndExit
+;
+Display32:
+	load	r1,interrupt32	; Set up interrupt register
+
+	ldi	023H		; Value for x=2; p=3
+	str	r2		; Save for return instruction
+	ret			; Keep x=2; p=3 and enable interrupts
+	lbr	Display		; go to main routine and wait for interrupt
+Display64:
+	load	r1,interrupt64	; Set up interrupt register
+
+	ldi	023H		; Value for x=2; p=3
+	str	r2		; Save for return instruction
+	ret			; Keep x=2; p=3 and enable interrupts
+Display:
+	inp	1		; Turn on Video
+	call	f_inmsg
+	db	'Press any key to exit...',0
+	ghi	re
+	ani	0feh		; turn echo off
+	phi	re
+Wait:	call	O_READKEY	; wait for Input pressed to exit
+	ldi	23H		; value for x=2, p=3
+	str	r2		; store on stack for disable instruction
+	dis			; x=2, p=3 and disable interrupts
+	out	1		; turn off Video, increments stack
+	dec	2		; put stack pointer back to original
+	out	1		; and once more for Gaston's Teensy
+	dec	2		; 1861!
+	call	f_inmsg
+	db	cr,lf,0
+	ghi	re
+	ori	001h		; turn echo back on
+	phi	re
+CloseFileAndExit:
+	load	rf,ImgFildes
+	call	O_CLOSE		; close the image file
+	lbr	O_WRMBOOT	; return to Elf/OS
+;
+return32:
+	ldxa			; restore D,
+	ret			; return point X, P back to original locations
+interrupt32:
+	dec	r2		; move stack pointer
+	sav			; save T register
+	dec	r2		; move stack pointer
+	str	r2		; Store D onto stack
+	nop			; 3 nops = 9 cycles to make interrupt
+	nop			; routine exactly the 29 instruction cycles
+	nop			; required for 1861 timing
+	ldi	high ImgBuff	; point dma register at code page
+	phi	r0		;
+	ldi	low ImgBuff	; point dma register at code page
+	plo	r0
+refresh32:
+	glo	r0		; D = r0.0
+	sex	r2		; X = 2
+				; <----- 8 DMA cycles occur here (R0+8)
+	sex	r2		; there is time for exactly 6 instruction cycles
+	dec	r0		; utilized here by 3 two-cycle instructions
+	plo	r0		; in between dma requests
+				; <----- 8 DMA cycles occur here (R0+8)
+	sex	r2
+	dec	r0
+	plo	r0
+				; <----- 8 DMA cycles occur here (R0+8)
+	sex	r2
+	dec	r0
+	plo	r0
+				; <----- 8 DMA cycles occur here (R0+8)
+	bn1	refresh32	; go to refresh if EF1 false
+	br	return32	; return if EF1 true (end of frame)
+;
+return64:
+	ldxa			; restore D,
+	ret			; return point X, P back to original locations
+interrupt64:
+	dec	r2		; move stack pointer
+	sav			; save T register
+	dec	r2		; move stack pointer
+	str	r2		; Store D onto stack
+	nop			; 3 nops = 9 cycles to make interrupt
+	nop			; routine exactly the 29 instruction cycles
+	nop			; required for 1861 timing
+	ldi	high ImgBuff	; point dma register at code page
+	phi	r0		;
+	ldi	low ImgBuff	; point dma register at code page
+	plo	r0
+refresh64:
+	glo	r0		; D = r0.0
+	sex	r2		; X = 2
+				; <----- 8 DMA cycles occur here (R0+8)
+	sex	r2		; there is time for exactly 6 instruction cycles
+	dec	r0		; utilized here by 3 two-cycle instructions
+	plo	r0		; in between dma requests
+				; <----- 8 DMA cycles occur here (R0+8)
+	sex	r2
+	sex	r2
+	glo	r0
+				; <----- 8 DMA cycles occur here (R0+10)
+	sex	r2
+	dec	r0
+	plo	r0
+				; <----- 8 DMA cycles occur here (R0+10)
+	bn1	refresh64	; go to refresh if EF1 false
+	br	return64	; return if EF1 true (end of frame)
+
+;
+ImgFildes:
+	db	0,0,0,0
+	dw	ImgDTA
+	db	0,0
+	db	0
+	db	0,0,0,0
+	dw	0,0
+	db	0,0,0,0
+;
+endrom	equ	$
+;
+	page
+ImgBuff:	ds	512
+;
+ImgDTA:	ds	512
+
+	end
