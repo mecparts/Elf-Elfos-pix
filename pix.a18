@@ -3,6 +3,8 @@
 ; ***
 ; *** Build #
 ; ***  1: Initial version
+; ***  2: Use local stack and 'dec r2' after ret/dis to keep r2
+; ***     inbounds (ret/dis increment r2)
 ; *******************************************************************
 ; *** This software is copyleft 2021 by Wayne Hortensius          ***
 ; *** All wrongs reserved.                                        ***
@@ -28,11 +30,11 @@ OrgAddr	equ	2000h
 	org	OrgAddr
 Start:	br	Main
 ;
-Date:	db	80h+3		; Month: April
-	db	25		; Day 25
+Date:	db	80h+7		; Month: July
+	db	21		; Day 21
 	dw	2021		; year = 2021
 ;
-Build:	dw	1		; build number
+Build:	dw	2		; build number
 	db	'@Copyleft 2021 Wayne Hortensius',0
 ;
 cr	equ	13
@@ -53,7 +55,15 @@ tab	equ	9
 ; RE:    Elf/OS
 ; RF:    
 ;
-Main:	lda	ra		; ra -> command tail
+Main:	load	rf,saveStack	; save Elf/OS's stack
+	ghi	r2
+	str	rf
+	inc	rf
+	glo	r2
+	str	rf
+	load	r2,localStack	; use our own stack
+;
+	lda	ra		; ra -> command tail
 	smi	' '		; skip over spaces to find
 	lbz	Main		; filename argument
 	dec	ra
@@ -76,7 +86,7 @@ FindTerminator:
 	lbnz	OpenImg		; yep, try opening it as a file
 	call	f_inmsg		; otherwise display usage message
 	db	'Usage: pix imagefile',cr,lf,0
-	retn			; return to Elf/OS
+	lbr	Exit		; return to Elf/OS
 ;
 OpenImg:
 	load	rd,ImgFildes	; image file descriptor
@@ -86,7 +96,7 @@ OpenImg:
 	lbnf	ImgOpened	; DF=0, file was opened
 	call	f_inmsg
 	db	'File not found',cr,lf,0
-	lbr	O_WRMBOOT	; return to Elf/OS
+	lbr	Exit		; return to Elf/OS
 ;
 ImgOpened:
 	load	rc,512
@@ -117,6 +127,7 @@ Display32:
 	ldi	023H		; Value for x=2; p=3
 	str	r2		; Save for return instruction
 	ret			; Keep x=2; p=3 and enable interrupts
+	dec	r2
 	lbr	Display		; go to main routine and wait for interrupt
 Display64:
 	load	r1,interrupt64	; Set up interrupt register
@@ -124,6 +135,7 @@ Display64:
 	ldi	023H		; Value for x=2; p=3
 	str	r2		; Save for return instruction
 	ret			; Keep x=2; p=3 and enable interrupts
+	dec	r2
 Display:
 	inp	1		; Turn on Video
 	call	f_inmsg
@@ -135,10 +147,11 @@ Wait:	call	O_READKEY	; wait for Input pressed to exit
 	ldi	23H		; value for x=2, p=3
 	str	r2		; store on stack for disable instruction
 	dis			; x=2, p=3 and disable interrupts
+	dec	r2
 	out	1		; turn off Video, increments stack
-	dec	2		; put stack pointer back to original
+	dec	r2		; put stack pointer back to original
 	out	1		; and once more for Gaston's Teensy
-	dec	2		; 1861!
+	dec	r2		; 1861!
 	call	f_inmsg
 	db	cr,lf,0
 	ghi	re
@@ -147,7 +160,12 @@ Wait:	call	O_READKEY	; wait for Input pressed to exit
 CloseFileAndExit:
 	load	rf,ImgFildes
 	call	O_CLOSE		; close the image file
-	lbr	O_WRMBOOT	; return to Elf/OS
+Exit:	load	rf,saveStack	; restore Elf/OS's stack
+	lda	rf
+	phi	r2
+	ldn	rf
+	plo	r2
+	retn			; return to Elf/OS
 ;
 return32:
 	ldxa			; restore D,
@@ -228,6 +246,12 @@ ImgFildes:
 	db	0,0,0,0
 ;
 endrom	equ	$
+;
+	ds	80
+localStack:
+	ds	1
+saveStack:
+	ds	2
 ;
 	page
 ImgBuff:	ds	512
